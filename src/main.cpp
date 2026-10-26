@@ -40,11 +40,11 @@ private:
     // before accepting another press. This prevents synthetic re-presses on respawn.
     bool m_waitForReleaseAfterDeath = false;
 
-    // F6 Cycle State (Starts on Stage 0: 2 ticks Normal / 2 ticks Wave)
+    // F6 cycle starts on Stage 1: 1 tick Normal / 1 tick Wave.
     int  m_presetIndex = 0;
     bool m_enabled = true;
-    int  m_maxTicksNormal = 2;
-    int  m_maxTicksWave = 2;
+    int  m_maxTicksNormal = 1;
+    int  m_maxTicksWave = 1;
 
     // Buffer state
     int  m_waitTicks = -1;          // -1 = inactive, >= 0 = countdown ticks, -2 = queued opposite tick
@@ -135,45 +135,52 @@ public:
         resetAttemptInputState(false);
     }
 
-    // Cycles through the 5 F6 stages:
-    // 0: 2 All / 2 Wave -> 1: 4 All / 4 Wave -> 2: 8 All / 8 Wave -> 3: 16 All / 8 Wave -> 4: OFF
+    // Cycles through 6 F6 stages:
+    // 1: 1/1 -> 2: 2/2 -> 3: 4/4 -> 4: 8/8 -> 5: 16/8 -> 6: OFF.
     void cyclePreset() {
-        m_presetIndex = (m_presetIndex + 1) % 5;
+        m_presetIndex = (m_presetIndex + 1) % 6;
         m_waitTicks = -1;
         m_queuedOpposite = false;
 
         switch (m_presetIndex) {
             case 0:
                 m_enabled = true;
-                m_maxTicksNormal = 2;
-                m_maxTicksWave = 2;
-                printf("[InputBuffer] F6 Cycle -> STAGE 1: 2 Ticks All | 2 Ticks Wave (0.5f @ 60fps)\n");
+                m_maxTicksNormal = 1;
+                m_maxTicksWave = 1;
+                printf("[InputBuffer] F6 Cycle -> STAGE 1: 1 Tick All | 1 Tick Wave (0.25f @ 60fps)\n");
                 break;
             case 1:
                 m_enabled = true;
-                m_maxTicksNormal = 4;
-                m_maxTicksWave = 4;
-                printf("[InputBuffer] F6 Cycle -> STAGE 2: 4 Ticks All | 4 Ticks Wave (1.0f @ 60fps)\n");
+                m_maxTicksNormal = 2;
+                m_maxTicksWave = 2;
+                printf("[InputBuffer] F6 Cycle -> STAGE 2: 2 Ticks All | 2 Ticks Wave (0.5f @ 60fps)\n");
                 break;
             case 2:
                 m_enabled = true;
-                m_maxTicksNormal = 8;
-                m_maxTicksWave = 8;
-                printf("[InputBuffer] F6 Cycle -> STAGE 3: 8 Ticks All | 8 Ticks Wave (2.0f @ 60fps)\n");
+                m_maxTicksNormal = 4;
+                m_maxTicksWave = 4;
+                printf("[InputBuffer] F6 Cycle -> STAGE 3: 4 Ticks All | 4 Ticks Wave (1.0f @ 60fps)\n");
                 break;
             case 3:
                 m_enabled = true;
-                m_maxTicksNormal = 16;
+                m_maxTicksNormal = 8;
                 m_maxTicksWave = 8;
-                printf("[InputBuffer] F6 Cycle -> STAGE 4: 16 Ticks All | 8 Ticks Wave (4.0f / 2.0f @ 60fps)\n");
+                printf("[InputBuffer] F6 Cycle -> STAGE 4: 8 Ticks All | 8 Ticks Wave (2.0f @ 60fps)\n");
                 break;
             case 4:
+                m_enabled = true;
+                m_maxTicksNormal = 16;
+                m_maxTicksWave = 8;
+                printf("[InputBuffer] F6 Cycle -> STAGE 5: 16 Ticks All | 8 Ticks Wave (4.0f / 2.0f @ 60fps)\n");
+                break;
+            case 5:
                 m_enabled = false;
                 m_maxTicksNormal = 0;
                 m_maxTicksWave = 0;
-                printf("[InputBuffer] F6 Cycle -> STAGE 5: OFF (100%% Raw Input)\n");
+                printf("[InputBuffer] F6 Cycle -> STAGE 6: OFF (100%% Raw Input)\n");
                 break;
         }
+        fflush(stdout);
     }
 
     bool isSimulating() const { return m_simulating; }
@@ -401,9 +408,9 @@ public:
         m_queuedOpposite = false;
         const char* act = push ? "PRESS" : "RELEASE";
 
-        // Full Show-Trajectory lookahead for Wave (65 ticks / 50 ticks Mini Wave)
-        // so it sees spikes and sawblades 1-3 blocks ahead along the diagonal path!
-        int targetHorizon = isMiniWave ? 50 : (isWave ? 65 : 160);
+        // Extended trajectory lookahead. The collision-object scratch vector below
+        // is reused to reduce allocations while scanning longer horizons.
+        int targetHorizon = isMiniWave ? 60 : (isWave ? 80 : 200);
         int maxDelayFrames = isWave ? m_maxTicksWave : m_maxTicksNormal;
 
         // 4. Check Frame 0 (immediate input) across the full trajectory horizon
@@ -466,9 +473,18 @@ public:
         PlayLayer* pl = PlayLayer::get();
         if (!pl || player != pl->m_player1) return;
 
-        // Check F6 before m_enabled check so you can always cycle back ON when it is OFF!
+        // F6 cycles buffer stages. F7 hides/shows the diagnostic console without
+        // closing it, so logging remains available when the console is visible.
         if (GetAsyncKeyState(VK_F6) & 1) {
             cyclePreset();
+        }
+        if (GetAsyncKeyState(VK_F7) & 1) {
+            HWND console = GetConsoleWindow();
+            if (console) {
+                static bool consoleVisible = true;
+                consoleVisible = !consoleVisible;
+                ShowWindow(console, consoleVisible ? SW_SHOW : SW_HIDE);
+            }
         }
 
         if (!m_enabled) return;
@@ -532,10 +548,13 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] v4.6 LOADED (Wave Spikes/Saws Trajectory Fix)\n");
-    printf(" [InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)\n");
-    printf(" [InputBuffer] Press F6 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF\n");
+    printf(" [InputBuffer] Prototype v0.2 loaded\n");
+    printf(" [InputBuffer] Starting Mode: STAGE 1 (1 All / 1 Wave)\n");
+    printf(" [InputBuffer] F6: cycle 1/1 -> 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF\n");
+    printf(" [InputBuffer] F7: hide/show this console\n");
+    printf(" [InputBuffer] Extended lookahead: Normal 200 / Wave 80 / Mini Wave 60 ticks\n");
     printf("============================================================\n");
+    fflush(stdout);
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -670,8 +689,13 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
 
     void collisionCheckObjects(PlayerObject* player, gd::vector<GameObject*>* vec, int objectsCount, float dt) {
         if (s_sim.isSimulating()) {
-            gd::vector<GameObject*> extra;
-            extra.reserve(objectsCount);
+            // Reuse the same temporary vector on every simulated tick to avoid
+            // repeated heap allocations during trajectory prediction.
+            static gd::vector<GameObject*> extra;
+            extra.clear();
+            if (extra.capacity() < static_cast<size_t>(objectsCount)) {
+                extra.reserve(objectsCount);
+            }
             for (int i = 0; i < objectsCount; i++) {
                 GameObject* obj = vec->at(i);
                 if (!obj) continue;
