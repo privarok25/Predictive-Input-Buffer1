@@ -9,6 +9,7 @@
 #include <Windows.h>
 #include <cstdio>
 #include <algorithm>
+#include <deque>
 
 using namespace geode::prelude;
 
@@ -43,13 +44,17 @@ private:
     // F6 cycle starts on Stage 1: 1 tick Normal / 1 tick Wave.
     int  m_presetIndex = 0;
     bool m_enabled = true;
+    // Ship helper is opt-in at runtime via F8; existing v0.2 behavior stays unchanged until enabled.
+    bool m_shipPrecisionEnabled = false;
+    // Raw passthrough for noclip runs / debugging: no trajectory prediction or input buffering.
+    bool m_rawInputMode = false;
     int  m_maxTicksNormal = 1;
     int  m_maxTicksWave = 1;
 
     // Buffer state
     int  m_waitTicks = -1;          // -1 = inactive, >= 0 = countdown ticks, -2 = queued opposite tick
     bool m_bufferedPush = true;     // true = buffered PRESS, false = buffered RELEASE
-    bool m_queuedOpposite = false;  // true if user quickly released/re-pressed during wait
+    std::deque<bool> m_queuedInputs; // preserve every alternating edge while a buffered input is pending
     float m_frameDt = 0.25f;        // GD 240 TPS normalized dt is 0.25f
 
     // Streak-based Spam Guard state
@@ -102,7 +107,7 @@ private:
     void resetAttemptInputState(bool physicalHeld = false) {
         m_waitTicks = -1;
         m_bufferedPush = true;
-        m_queuedOpposite = false;
+        m_queuedInputs.clear();
         m_physicalHolding = physicalHeld;
         m_gameHolding = false;
         m_waitForReleaseAfterDeath = physicalHeld;
@@ -140,7 +145,7 @@ public:
     void cyclePreset() {
         m_presetIndex = (m_presetIndex + 1) % 6;
         m_waitTicks = -1;
-        m_queuedOpposite = false;
+        m_queuedInputs.clear();
 
         switch (m_presetIndex) {
             case 0:
@@ -235,8 +240,8 @@ public:
 
         float dt = getValidDt();
         int survived = 0;
-        bool isContinuousMode = realP1->m_isDart || realP1->m_isBird || realP1->m_isSwing ||
-                                (isDual && realP2 && (realP2->m_isDart || realP2->m_isBird || realP2->m_isSwing));
+        bool isContinuousMode = realP1->m_isDart || realP1->m_isBird || realP1->m_isSwing || realP1->m_isShip ||
+                                (isDual && realP2 && (realP2->m_isDart || realP2->m_isBird || realP2->m_isSwing || realP2->m_isShip));
         int airborneTicks = 0;
         int safeLandedTicks = 0;
 
@@ -314,6 +319,16 @@ public:
         // Always record the user's true physical mouse/key state first!
         m_physicalHolding = push;
 
+        // Raw passthrough mode is intended for noclip runs: do not predict, delay,
+        // queue, or synthesize trajectory-based input while it is active.
+        if (m_rawInputMode) {
+            m_waitForReleaseAfterDeath = false;
+            m_waitTicks = -1;
+            m_queuedInputs.clear();
+            m_gameHolding = push;
+            return true;
+        }
+
         // After a death during a held input, ignore presses until a real release
         // arrives. Pass the release through and then re-arm the buffer.
         if (m_waitForReleaseAfterDeath) {
@@ -321,7 +336,7 @@ public:
                 m_waitForReleaseAfterDeath = false;
                 m_gameHolding = false;
                 m_waitTicks = -1;
-                m_queuedOpposite = false;
+                m_queuedInputs.clear();
                 m_ticksSinceLastInput = 999;
                 m_rapidInputStreak = 0;
                 return true;
@@ -340,7 +355,7 @@ public:
             // Inputs during death/restart are passed through raw, but must not
             // leave a pending buffered action or spam-guard history behind.
             m_waitTicks = -1;
-            m_queuedOpposite = false;
+            m_queuedInputs.clear();
             m_bufferedPush = true;
             m_gameHolding = push;
             m_ticksSinceLastInput = 999;
@@ -348,34 +363,37 @@ public:
             return true;
         }
 
-        // 1. NEVER touch Ship mode (or Dual with Ship)
-        if (p1->m_isShip || (isDual && p2 && p2->m_isShip)) {
+        // Ship stays on raw input unless the experimental helper is enabled.
+        // The helper only delays real user input; it never steers or changes physics.
+        bool isShip = p1->m_isShip || (isDual && p2 && p2->m_isShip);
+        if (isShip && !m_shipPrecisionEnabled) {
             m_waitTicks = -1;
-            m_queuedOpposite = false;
+            m_queuedInputs.clear();
             m_gameHolding = push;
             return true;
         }
 
-        // 2. If an input is currently waiting in the buffer and the user quickly releases
-        // (or re-presses) 1-2 ticks later, queue it for the next tick so fast taps are never eaten
+        // If a buffered edge is waiting, preserve subsequent state changes in order.
+        // The old single bool could be reset by a fast re-press and silently lose a release.
+        auto enqueueEdge = [this](bool state) {
+            bool lastScheduled = m_queuedInputs.empty()
+                ? (m_waitTicks >= 0 ? m_bufferedPush : m_gameHolding)
+                : m_queuedInputs.back();
+            if (state != lastScheduled) m_queuedInputs.push_back(state);
+        };
+
         if (m_waitTicks >= 0) {
-            if (push != m_bufferedPush) {
-                m_queuedOpposite = true;
-            } else {
-                m_queuedOpposite = false;
-            }
+            enqueueEdge(push);
             m_ticksSinceLastInput = 0;
             return false;
         }
 
-        // If a queued opposite action is due to fire on the next tick (m_waitTicks == -2)
-        // and the user clicks again, fire the pending opposite action first
-        if (m_waitTicks == -2) {
-            m_waitTicks = -1;
-            m_queuedOpposite = false;
-            if (m_gameHolding != !m_bufferedPush) {
-                m_SimFireButton(pl, !m_bufferedPush);
-            }
+        // Drain queued edges before starting another prediction. This preserves
+        // press/release/press sequences during fast Wave gameplay.
+        if (!m_queuedInputs.empty()) {
+            enqueueEdge(push);
+            m_ticksSinceLastInput = 0;
+            return false;
         }
 
         bool isWave = p1->m_isDart || (isDual && p2 && p2->m_isDart);
@@ -397,15 +415,15 @@ public:
             return true;
         }
 
-        // Only Wave (m_isDart) and Robot (m_isRobot) change trajectory on RELEASE
-        bool releaseAffectsPhysics = p1->m_isDart || p1->m_isRobot ||
-                                     (isDual && p2 && (p2->m_isDart || p2->m_isRobot));
+        // Release changes trajectory for Wave, Robot, and Ship.
+        bool releaseAffectsPhysics = p1->m_isDart || p1->m_isRobot || p1->m_isShip ||
+                                     (isDual && p2 && (p2->m_isDart || p2->m_isRobot || p2->m_isShip));
         if (!push && !releaseAffectsPhysics) {
             m_gameHolding = false;
             return true;
         }
 
-        m_queuedOpposite = false;
+        m_queuedInputs.clear();
         const char* act = push ? "PRESS" : "RELEASE";
 
         // Extended trajectory lookahead. The collision-object scratch vector below
@@ -473,10 +491,31 @@ public:
         PlayLayer* pl = PlayLayer::get();
         if (!pl || player != pl->m_player1) return;
 
-        // F6 cycles buffer stages. F7 hides/shows the diagnostic console without
-        // closing it, so logging remains available when the console is visible.
+        // F6 cycles buffer stages. F7 hides/shows the diagnostic console. F8 toggles
+        // experimental Ship Precision without changing the game physics.
         if (GetAsyncKeyState(VK_F6) & 1) {
             cyclePreset();
+        }
+        if (GetAsyncKeyState(VK_F8) & 1) {
+            m_shipPrecisionEnabled = !m_shipPrecisionEnabled;
+            m_waitTicks = -1;
+            m_queuedInputs.clear();
+            printf("[InputBuffer] Ship Precision %s\n", m_shipPrecisionEnabled ? "ON" : "OFF");
+            if (!m_shipPrecisionEnabled && m_gameHolding != m_physicalHolding) {
+                m_SimFireButton(pl, m_physicalHolding);
+            }
+            fflush(stdout);
+        }
+        if (GetAsyncKeyState(VK_F9) & 1) {
+            m_rawInputMode = !m_rawInputMode;
+            m_waitTicks = -1;
+            m_queuedInputs.clear();
+            if (m_rawInputMode) m_waitForReleaseAfterDeath = false;
+            printf("[InputBuffer] Raw Input / Noclip Compatibility %s\n", m_rawInputMode ? "ON" : "OFF");
+            if (m_gameHolding != m_physicalHolding) {
+                m_SimFireButton(pl, m_physicalHolding);
+            }
+            fflush(stdout);
         }
         if (GetAsyncKeyState(VK_F7) & 1) {
             HWND console = GetConsoleWindow();
@@ -485,6 +524,15 @@ public:
                 consoleVisible = !consoleVisible;
                 ShowWindow(console, consoleVisible ? SW_SHOW : SW_HIDE);
             }
+        }
+
+        if (m_rawInputMode) {
+            m_waitTicks = -1;
+            m_queuedInputs.clear();
+            if (m_gameHolding != m_physicalHolding) {
+                m_SimFireButton(pl, m_physicalHolding);
+            }
+            return;
         }
 
         if (!m_enabled) return;
@@ -497,9 +545,10 @@ public:
             m_ticksSinceLastInput++;
         }
 
-        if (player->m_isShip || (pl->m_gameState.m_isDualMode && pl->m_player2 && pl->m_player2->m_isShip)) {
+        bool isShip = player->m_isShip || (pl->m_gameState.m_isDualMode && pl->m_player2 && pl->m_player2->m_isShip);
+        if (isShip && !m_shipPrecisionEnabled) {
             m_waitTicks = -1;
-            m_queuedOpposite = false;
+            m_queuedInputs.clear();
             if (m_gameHolding != m_physicalHolding) {
                 m_SimFireButton(pl, m_physicalHolding);
             }
@@ -508,21 +557,17 @@ public:
 
         if (m_waitTicks == 0) {
             m_SimFireButton(pl, m_bufferedPush);
-            if (m_queuedOpposite) {
-                m_waitTicks = -2;
-                m_queuedOpposite = false;
-            } else {
-                m_waitTicks = -1;
-            }
+            m_waitTicks = -1;
         } else if (m_waitTicks > 0) {
             m_waitTicks--;
-        } else if (m_waitTicks == -2) {
-            m_SimFireButton(pl, !m_bufferedPush);
-            m_queuedOpposite = false;
-            m_waitTicks = -1;
+        } else if (m_waitTicks == -1 && !m_queuedInputs.empty()) {
+            bool nextState = m_queuedInputs.front();
+            m_queuedInputs.pop_front();
+            if (m_gameHolding != nextState) {
+                m_SimFireButton(pl, nextState);
+            }
         } else if (m_waitTicks == -1) {
-            // FAILSAFE: When no buffer is active, guarantee the game's hold state
-            // matches your actual physical mouse button so Wave/Mini Wave can NEVER stay stuck holding!
+            // Failsafe: keep the game state synchronized with the real physical state.
             if (m_gameHolding != m_physicalHolding) {
                 m_SimFireButton(pl, m_physicalHolding);
             }
@@ -548,11 +593,15 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] Prototype v0.2 loaded\n");
+    printf(" [InputBuffer] Prototype v0.4 loaded\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (1 All / 1 Wave)\n");
     printf(" [InputBuffer] F6: cycle 1/1 -> 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF\n");
     printf(" [InputBuffer] F7: hide/show this console\n");
-    printf(" [InputBuffer] Extended lookahead: Normal 200 / Wave 80 / Mini Wave 60 ticks\n");
+    printf(" [InputBuffer] F8: toggle experimental Ship Precision (default OFF)\n");
+    printf(" [InputBuffer] F9: Raw Input / Noclip Compatibility (bypass predictor)\n");
+    printf(" [InputBuffer] Ship helper: original physics, input buffering only\n");
+    printf(" [InputBuffer] F9 bypasses prediction for noclip runs; toggle back to restore buffering\n");
+    printf(" [InputBuffer] Extended lookahead: Normal/Ship 200 / Wave 80 / Mini Wave 60 ticks\n");
     printf("============================================================\n");
     fflush(stdout);
 }
