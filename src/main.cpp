@@ -46,8 +46,6 @@ private:
     bool m_enabled = true;
     // Ship helper is opt-in at runtime via F8; existing v0.2 behavior stays unchanged until enabled.
     bool m_shipPrecisionEnabled = false;
-    // Raw passthrough for noclip runs / debugging: no trajectory prediction or input buffering.
-    bool m_rawInputMode = false;
     int  m_maxTicksNormal = 1;
     int  m_maxTicksWave = 1;
 
@@ -319,16 +317,6 @@ public:
         // Always record the user's true physical mouse/key state first!
         m_physicalHolding = push;
 
-        // Raw passthrough mode is intended for noclip runs: do not predict, delay,
-        // queue, or synthesize trajectory-based input while it is active.
-        if (m_rawInputMode) {
-            m_waitForReleaseAfterDeath = false;
-            m_waitTicks = -1;
-            m_queuedInputs.clear();
-            m_gameHolding = push;
-            return true;
-        }
-
         // After a death during a held input, ignore presses until a real release
         // arrives. Pass the release through and then re-arm the buffer.
         if (m_waitForReleaseAfterDeath) {
@@ -428,7 +416,10 @@ public:
 
         // Extended trajectory lookahead. The collision-object scratch vector below
         // is reused to reduce allocations while scanning longer horizons.
-        int targetHorizon = isMiniWave ? 60 : (isWave ? 80 : 200);
+        // Ship prediction deliberately uses a short horizon. Long simulated
+        // straight-fly predictions drift from live state and must not trigger
+        // buffering. Only a near-term, clearly survivable delayed edge qualifies.
+        int targetHorizon = isShip ? 40 : (isMiniWave ? 60 : (isWave ? 80 : 200));
         int maxDelayFrames = isWave ? m_maxTicksWave : m_maxTicksNormal;
 
         // 4. Check Frame 0 (immediate input) across the full trajectory horizon
@@ -461,6 +452,16 @@ public:
                     bestDelay = delay;
                     bestTicks = ticks;
                     if (ticks >= targetHorizon) break;
+                }
+            } else if (isShip) {
+                // Ship Precision is intentionally conservative: only buffer if
+                // the current edge predicts a collision very soon, and a small
+                // delay survives the entire short horizon. Never optimize a
+                // long straight flight based on speculative distant collisions.
+                if (ticksFrame0 <= 20 && ticks >= targetHorizon) {
+                    bestDelay = delay;
+                    bestTicks = ticks;
+                    break;
                 }
             } else {
                 if (ticks >= targetHorizon) {
@@ -506,17 +507,6 @@ public:
             }
             fflush(stdout);
         }
-        if (GetAsyncKeyState(VK_F9) & 1) {
-            m_rawInputMode = !m_rawInputMode;
-            m_waitTicks = -1;
-            m_queuedInputs.clear();
-            if (m_rawInputMode) m_waitForReleaseAfterDeath = false;
-            printf("[InputBuffer] Raw Input / Noclip Compatibility %s\n", m_rawInputMode ? "ON" : "OFF");
-            if (m_gameHolding != m_physicalHolding) {
-                m_SimFireButton(pl, m_physicalHolding);
-            }
-            fflush(stdout);
-        }
         if (GetAsyncKeyState(VK_F7) & 1) {
             HWND console = GetConsoleWindow();
             if (console) {
@@ -524,15 +514,6 @@ public:
                 consoleVisible = !consoleVisible;
                 ShowWindow(console, consoleVisible ? SW_SHOW : SW_HIDE);
             }
-        }
-
-        if (m_rawInputMode) {
-            m_waitTicks = -1;
-            m_queuedInputs.clear();
-            if (m_gameHolding != m_physicalHolding) {
-                m_SimFireButton(pl, m_physicalHolding);
-            }
-            return;
         }
 
         if (!m_enabled) return;
@@ -593,14 +574,12 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] Prototype v0.4 loaded\n");
+    printf(" [InputBuffer] Prototype v0.5 loaded\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (1 All / 1 Wave)\n");
     printf(" [InputBuffer] F6: cycle 1/1 -> 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF\n");
     printf(" [InputBuffer] F7: hide/show this console\n");
     printf(" [InputBuffer] F8: toggle experimental Ship Precision (default OFF)\n");
-    printf(" [InputBuffer] F9: Raw Input / Noclip Compatibility (bypass predictor)\n");
-    printf(" [InputBuffer] Ship helper: original physics, input buffering only\n");
-    printf(" [InputBuffer] F9 bypasses prediction for noclip runs; toggle back to restore buffering\n");
+    printf(" [InputBuffer] Ship helper: short-horizon precision only; straight-fly inputs stay raw\n");
     printf(" [InputBuffer] Extended lookahead: Normal/Ship 200 / Wave 80 / Mini Wave 60 ticks\n");
     printf("============================================================\n");
     fflush(stdout);
