@@ -20,3 +20,9 @@ This source has not been compiled or tested in-game in this environment. Test in
 
 ## Build
 The included GitHub Actions workflow builds a Windows `.geode` artifact using the configured Geode SDK setup.
+
+
+## v0.6 input-edge fix
+- Duplicate physical DOWN/UP notifications are ignored while buffering is enabled, preventing duplicate clicks from entering prediction/queue logic.
+- Queued edges are dispatched only when they differ from the current game-held state.
+- Raw-input mode (F6 OFF) is unchanged.

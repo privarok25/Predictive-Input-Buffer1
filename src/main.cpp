@@ -314,7 +314,10 @@ public:
             return true;
         }
 
-        // Always record the user's true physical mouse/key state first!
+        // Capture the prior physical state before updating it. Some input paths
+        // can report the same button edge more than once; treating a duplicate
+        // DOWN as a fresh edge can create an extra click (e.g. 1 CPS -> 2 CPS).
+        const bool wasPhysicalHolding = m_physicalHolding;
         m_physicalHolding = push;
 
         // After a death during a held input, ignore presses until a real release
@@ -335,6 +338,13 @@ public:
         if (!m_enabled) {
             m_gameHolding = push;
             return true;
+        }
+
+        // Only real state transitions are valid edges. Consume duplicate DOWN /
+        // UP notifications while the buffer is active, before they can enter the
+        // prediction path or queue. Raw-input mode (F6 OFF) remains untouched.
+        if (push == wasPhysicalHolding) {
+            return false;
         }
 
         PlayerObject* p1 = layer->m_player1;
@@ -542,6 +552,9 @@ public:
         } else if (m_waitTicks > 0) {
             m_waitTicks--;
         } else if (m_waitTicks == -1 && !m_queuedInputs.empty()) {
+            // Drain exactly one edge per update and only dispatch an actual state
+            // transition. This preserves press/release order without generating
+            // duplicate clicks when the queue and live state have converged.
             bool nextState = m_queuedInputs.front();
             m_queuedInputs.pop_front();
             if (m_gameHolding != nextState) {
@@ -574,7 +587,7 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] Prototype v0.5 loaded\n");
+    printf(" [InputBuffer] Prototype v0.6 loaded\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (1 All / 1 Wave)\n");
     printf(" [InputBuffer] F6: cycle 1/1 -> 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF\n");
     printf(" [InputBuffer] F7: hide/show this console\n");
