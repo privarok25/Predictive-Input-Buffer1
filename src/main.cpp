@@ -44,7 +44,7 @@ private:
     // F6 cycle starts on Stage 1: 1 tick Normal / 1 tick Wave.
     int  m_presetIndex = 0;
     bool m_enabled = true;
-    // Ship helper is opt-in at runtime via F8; existing v0.2 behavior stays unchanged until enabled.
+    // Experimental ship helper remains disabled; F8 also explicitly forces it OFF.
     bool m_shipPrecisionEnabled = false;
     int  m_maxTicksNormal = 1;
     int  m_maxTicksWave = 1;
@@ -361,8 +361,8 @@ public:
             return true;
         }
 
-        // Ship stays on raw input unless the experimental helper is enabled.
-        // The helper only delays real user input; it never steers or changes physics.
+        // Ship stays on raw input. This helper is intentionally disabled; no ship
+        // inputs are buffered by the current build.
         bool isShip = p1->m_isShip || (isDual && p2 && p2->m_isShip);
         if (isShip && !m_shipPrecisionEnabled) {
             m_waitTicks = -1;
@@ -371,25 +371,51 @@ public:
             return true;
         }
 
-        // If a buffered edge is waiting, preserve subsequent state changes in order.
-        // The old single bool could be reset by a fast re-press and silently lose a release.
+        // Keep edge order while a predicted input is pending. If another physical
+        // edge arrives before the prediction delay expires, flush the pending edge
+        // and all queued transitions immediately, in order. Waiting for one edge per
+        // PlayerObject::update can make a tight Wave press/release arrive too late.
         auto enqueueEdge = [this](bool state) {
             bool lastScheduled = m_queuedInputs.empty()
                 ? (m_waitTicks >= 0 ? m_bufferedPush : m_gameHolding)
                 : m_queuedInputs.back();
             if (state != lastScheduled) m_queuedInputs.push_back(state);
         };
+        auto flushPendingEdges = [this, pl]() {
+            if (m_waitTicks >= 0) {
+                const bool pendingState = m_bufferedPush;
+                m_waitTicks = -1;
+                if (m_gameHolding != pendingState) {
+                    m_SimFireButton(pl, pendingState);
+                }
+            }
+            while (!m_queuedInputs.empty()) {
+                const bool nextState = m_queuedInputs.front();
+                m_queuedInputs.pop_front();
+                if (m_gameHolding != nextState) {
+                    m_SimFireButton(pl, nextState);
+                }
+            }
+            // The physical state is authoritative; recover if the queue and game
+            // state somehow diverged while processing a burst of edges.
+            if (m_gameHolding != m_physicalHolding) {
+                m_SimFireButton(pl, m_physicalHolding);
+            }
+        };
 
         if (m_waitTicks >= 0) {
             enqueueEdge(push);
+            flushPendingEdges();
             m_ticksSinceLastInput = 0;
             return false;
         }
 
-        // Drain queued edges before starting another prediction. This preserves
-        // press/release/press sequences during fast Wave gameplay.
+        // A queue should normally be empty outside a pending prediction. If an
+        // older pending sequence exists, resolve it now rather than dropping a
+        // new Wave edge or leaving the queue behind the real input.
         if (!m_queuedInputs.empty()) {
             enqueueEdge(push);
+            flushPendingEdges();
             m_ticksSinceLastInput = 0;
             return false;
         }
@@ -502,19 +528,25 @@ public:
         PlayLayer* pl = PlayLayer::get();
         if (!pl || player != pl->m_player1) return;
 
-        // F6 cycles buffer stages. F7 hides/shows the diagnostic console. F8 toggles
-        // experimental Ship Precision without changing the game physics.
+        // F6 cycles stages, F7 toggles console, F8 disables all stages and ship prediction.
         if (GetAsyncKeyState(VK_F6) & 1) {
             cyclePreset();
         }
         if (GetAsyncKeyState(VK_F8) & 1) {
-            m_shipPrecisionEnabled = !m_shipPrecisionEnabled;
+            m_presetIndex = 5;
+            m_enabled = false;
+            m_maxTicksNormal = 0;
+            m_maxTicksWave = 0;
+            m_shipPrecisionEnabled = false;
             m_waitTicks = -1;
             m_queuedInputs.clear();
-            printf("[InputBuffer] Ship Precision %s\n", m_shipPrecisionEnabled ? "ON" : "OFF");
-            if (!m_shipPrecisionEnabled && m_gameHolding != m_physicalHolding) {
+            m_rapidInputStreak = 0;
+            m_ticksSinceLastInput = 999;
+            // Release/press any state left pending before switching to raw input.
+            if (m_gameHolding != m_physicalHolding) {
                 m_SimFireButton(pl, m_physicalHolding);
             }
+            printf("[InputBuffer] F8 -> ALL STAGES + SHIP PREDICTIVE OFF (raw input)\n");
             fflush(stdout);
         }
         if (GetAsyncKeyState(VK_F7) & 1) {
@@ -587,12 +619,13 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] Prototype v0.6 loaded\n");
+    printf(" [InputBuffer] Prototype v0.9 loaded\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (1 All / 1 Wave)\n");
     printf(" [InputBuffer] F6: cycle 1/1 -> 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF\n");
     printf(" [InputBuffer] F7: hide/show this console\n");
-    printf(" [InputBuffer] F8: toggle experimental Ship Precision (default OFF)\n");
-    printf(" [InputBuffer] Ship helper: short-horizon precision only; straight-fly inputs stay raw\n");
+    printf(" [InputBuffer] F8: force ALL stages + ship prediction OFF (raw input)\n");
+    printf(" [InputBuffer] Ship inputs remain raw; ship helper disabled\n");
+    printf(" [InputBuffer] Edge-flush safety: pending predictions flush in order on a new physical edge\n");
     printf(" [InputBuffer] Extended lookahead: Normal/Ship 200 / Wave 80 / Mini Wave 60 ticks\n");
     printf("============================================================\n");
     fflush(stdout);
