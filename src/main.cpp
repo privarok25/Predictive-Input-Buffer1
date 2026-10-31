@@ -44,7 +44,7 @@ private:
     // F6 cycle starts on Stage 1: 1 tick Normal / 1 tick Wave.
     int  m_presetIndex = 0;
     bool m_enabled = true;
-    // Experimental ship helper remains disabled; F8 also explicitly forces it OFF.
+    // Ship prediction is independently toggled with F8.
     bool m_shipPrecisionEnabled = false;
     int  m_maxTicksNormal = 1;
     int  m_maxTicksWave = 1;
@@ -335,7 +335,13 @@ public:
             return false;
         }
 
-        if (!m_enabled) {
+        PlayerObject* p1 = layer->m_player1;
+        PlayerObject* p2 = isDual ? pl->m_player2 : nullptr;
+        const bool isShip = p1 && (p1->m_isShip || (isDual && p2 && p2->m_isShip));
+
+        // Stages and Ship Predictive are independent: F8 can enable ship-only
+        // prediction even when all normal stages are OFF.
+        if (!m_enabled && !(isShip && m_shipPrecisionEnabled)) {
             m_gameHolding = push;
             return true;
         }
@@ -347,8 +353,6 @@ public:
             return false;
         }
 
-        PlayerObject* p1 = layer->m_player1;
-        PlayerObject* p2 = isDual ? pl->m_player2 : nullptr;
         if (!p1 || p1->m_isDead) {
             // Inputs during death/restart are passed through raw, but must not
             // leave a pending buffered action or spam-guard history behind.
@@ -361,9 +365,7 @@ public:
             return true;
         }
 
-        // Ship stays on raw input. This helper is intentionally disabled; no ship
-        // inputs are buffered by the current build.
-        bool isShip = p1->m_isShip || (isDual && p2 && p2->m_isShip);
+        // Ship stays raw unless its independent F8 toggle is enabled.
         if (isShip && !m_shipPrecisionEnabled) {
             m_waitTicks = -1;
             m_queuedInputs.clear();
@@ -456,7 +458,7 @@ public:
         // straight-fly predictions drift from live state and must not trigger
         // buffering. Only a near-term, clearly survivable delayed edge qualifies.
         int targetHorizon = isShip ? 40 : (isMiniWave ? 60 : (isWave ? 80 : 200));
-        int maxDelayFrames = isWave ? m_maxTicksWave : m_maxTicksNormal;
+        int maxDelayFrames = isShip ? 8 : (isWave ? m_maxTicksWave : m_maxTicksNormal);
 
         // 4. Check Frame 0 (immediate input) across the full trajectory horizon
         int ticksFrame0 = getSurvivalTicks(pl, p1, p2, isDual, 0, push, targetHorizon);
@@ -528,11 +530,24 @@ public:
         PlayLayer* pl = PlayLayer::get();
         if (!pl || player != pl->m_player1) return;
 
-        // F6 cycles stages, F7 toggles console, F8 disables all stages and ship prediction.
+        // F6 cycles stages, F7 toggles console, F8 toggles Ship Predictive,
+        // F9 is the master OFF switch for stages + Ship Predictive.
         if (GetAsyncKeyState(VK_F6) & 1) {
             cyclePreset();
         }
         if (GetAsyncKeyState(VK_F8) & 1) {
+            m_shipPrecisionEnabled = !m_shipPrecisionEnabled;
+            m_waitTicks = -1;
+            m_queuedInputs.clear();
+            m_rapidInputStreak = 0;
+            m_ticksSinceLastInput = 999;
+            if (m_gameHolding != m_physicalHolding) {
+                m_SimFireButton(pl, m_physicalHolding);
+            }
+            printf("[InputBuffer] F8 -> SHIP PREDICTIVE %s\n", m_shipPrecisionEnabled ? "ON" : "OFF");
+            fflush(stdout);
+        }
+        if (GetAsyncKeyState(VK_F9) & 1) {
             m_presetIndex = 5;
             m_enabled = false;
             m_maxTicksNormal = 0;
@@ -542,11 +557,10 @@ public:
             m_queuedInputs.clear();
             m_rapidInputStreak = 0;
             m_ticksSinceLastInput = 999;
-            // Release/press any state left pending before switching to raw input.
             if (m_gameHolding != m_physicalHolding) {
                 m_SimFireButton(pl, m_physicalHolding);
             }
-            printf("[InputBuffer] F8 -> ALL STAGES + SHIP PREDICTIVE OFF (raw input)\n");
+            printf("[InputBuffer] F9 -> ALL STAGES + SHIP PREDICTIVE OFF (raw input)\n");
             fflush(stdout);
         }
         if (GetAsyncKeyState(VK_F7) & 1) {
@@ -558,7 +572,8 @@ public:
             }
         }
 
-        if (!m_enabled) return;
+        const bool playerIsShip = player->m_isShip || (pl->m_gameState.m_isDualMode && pl->m_player2 && pl->m_player2->m_isShip);
+        if (!m_enabled && !(playerIsShip && m_shipPrecisionEnabled)) return;
 
         // Do not let the normal state-sync path manufacture a press while the
         // physical button is still held from the previous attempt.
@@ -619,14 +634,14 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] Prototype v0.9 loaded\n");
+    printf(" [InputBuffer] Geode Mods Active loaded\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (1 All / 1 Wave)\n");
     printf(" [InputBuffer] F6: cycle 1/1 -> 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF\n");
     printf(" [InputBuffer] F7: hide/show this console\n");
-    printf(" [InputBuffer] F8: force ALL stages + ship prediction OFF (raw input)\n");
-    printf(" [InputBuffer] Ship inputs remain raw; ship helper disabled\n");
+    printf(" [InputBuffer] F8: toggle Ship Predictive ON/OFF\n");
+    printf(" [InputBuffer] F9: force ALL stages + Ship Predictive OFF (raw input)\n");
     printf(" [InputBuffer] Edge-flush safety: pending predictions flush in order on a new physical edge\n");
-    printf(" [InputBuffer] Extended lookahead: Normal/Ship 200 / Wave 80 / Mini Wave 60 ticks\n");
+    printf(" [InputBuffer] Extended lookahead: Normal 200 / Ship 40 / Wave 80 / Mini Wave 60 ticks\n");
     printf("============================================================\n");
     fflush(stdout);
 }

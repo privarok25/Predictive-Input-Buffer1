@@ -3,9 +3,9 @@
   "gd": {
     "win": "2.2081"
   },
-  "version": "v0.1.0",
+  "version": "v0.1.1",
   "id": "privarskii.predictivebuffer",
-  "name": "Predictive Input Buffer Prototype",
+  "name": "Geode Mods Active",
   "developer": "privarskii",
-  "description": "Predictive input buffering prototype with held-input protection across death/restart."
+  "description": "Input prediction helpers with independent ship toggle and global raw-input switch."
 }
