@@ -777,28 +777,13 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
     }
 
     void collisionCheckObjects(PlayerObject* player, gd::vector<GameObject*>* vec, int objectsCount, float dt) {
-        if (s_sim.isSimulating()) {
-            // Reuse the same temporary vector on every simulated tick to avoid
-            // repeated heap allocations during trajectory prediction.
-            static gd::vector<GameObject*> extra;
-            extra.clear();
-            if (extra.capacity() < static_cast<size_t>(objectsCount)) {
-                extra.reserve(objectsCount);
-            }
-            for (int i = 0; i < objectsCount; i++) {
-                GameObject* obj = vec->at(i);
-                if (!obj) continue;
-                if (obj->m_objectType == GameObjectType::Solid ||
-                    obj->m_objectType == GameObjectType::Hazard ||
-                    obj->m_objectType == GameObjectType::AnimatedHazard ||
-                    obj->m_objectType == GameObjectType::CollisionObject ||
-                    obj->m_objectType == GameObjectType::Slope) {
-                    extra.push_back(obj);
-                }
-            }
-            GJBaseGameLayer::collisionCheckObjects(player, &extra, extra.size(), dt);
-            return;
-        }
+        // Prediction must use the exact candidate-object list selected by the game.
+        // Do not second-guess it with an objectType whitelist: custom, animated,
+        // slope-like and future object types can otherwise be silently omitted,
+        // creating false "safe gaps" in overlapping geometry.
+        // Passing the original list also avoids rebuilding/filtering a vector on
+        // every simulated tick. The game's own collision routine remains the
+        // authority for collision semantics and hitboxes.
         GJBaseGameLayer::collisionCheckObjects(player, vec, objectsCount, dt);
     }
 
