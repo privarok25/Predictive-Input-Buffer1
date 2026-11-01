@@ -7,5 +7,5 @@
   "id": "privarskii.predictivebuffer",
   "name": "Geode Mods Active",
   "developer": "privarskii",
-  "description": "Input prediction helpers with independent ship toggle and global raw-input switch."
+  "description": "Input prediction helpers with stage-synchronized ship prediction and global raw-input switch."
 }

@@ -44,7 +44,7 @@ private:
     // F6 cycle starts on Stage 1: 1 tick Normal / 1 tick Wave.
     int  m_presetIndex = 0;
     bool m_enabled = true;
-    // Ship prediction is independently toggled with F8.
+    // F8 enables/disables Ship Predictive. When enabled, it uses the same active stage as every other mode.
     bool m_shipPrecisionEnabled = false;
     int  m_maxTicksNormal = 1;
     int  m_maxTicksWave = 1;
@@ -339,8 +339,8 @@ public:
         PlayerObject* p2 = isDual ? pl->m_player2 : nullptr;
         const bool isShip = p1 && (p1->m_isShip || (isDual && p2 && p2->m_isShip));
 
-        // Stages and Ship Predictive are independent: F8 can enable ship-only
-        // prediction even when all normal stages are OFF.
+        // Ship Predictive follows the currently selected stage. F8 only enables
+        // ship handling; it does not give ship a separate delay strength.
         if (!m_enabled && !(isShip && m_shipPrecisionEnabled)) {
             m_gameHolding = push;
             return true;
@@ -452,13 +452,11 @@ public:
         m_queuedInputs.clear();
         const char* act = push ? "PRESS" : "RELEASE";
 
-        // Extended trajectory lookahead. The collision-object scratch vector below
-        // is reused to reduce allocations while scanning longer horizons.
-        // Ship prediction deliberately uses a short horizon. Long simulated
-        // straight-fly predictions drift from live state and must not trigger
-        // buffering. Only a near-term, clearly survivable delayed edge qualifies.
+        // Extended trajectory lookahead. Ship uses a shorter horizon because
+        // long straight-flight simulation can drift from the live state. The
+        // selected stage controls the maximum ship delay, just like other modes.
         int targetHorizon = isShip ? 40 : (isMiniWave ? 60 : (isWave ? 80 : 200));
-        int maxDelayFrames = isShip ? 8 : (isWave ? m_maxTicksWave : m_maxTicksNormal);
+        int maxDelayFrames = isShip ? m_maxTicksNormal : (isWave ? m_maxTicksWave : m_maxTicksNormal);
 
         // 4. Check Frame 0 (immediate input) across the full trajectory horizon
         int ticksFrame0 = getSurvivalTicks(pl, p1, p2, isDual, 0, push, targetHorizon);
@@ -492,10 +490,11 @@ public:
                     if (ticks >= targetHorizon) break;
                 }
             } else if (isShip) {
-                // Ship Precision is intentionally conservative: only buffer if
-                // the current edge predicts a collision very soon, and a small
-                // delay survives the entire short horizon. Never optimize a
-                // long straight flight based on speculative distant collisions.
+                // Ship uses the selected global stage (1/2/4/8/16 ticks), but
+                // remains conservative: only delay an edge when the immediate
+                // trajectory is predicted to collide soon and the delayed edge
+                // survives the complete short horizon. This avoids speculative
+                // corrections during ordinary straight flight.
                 if (ticksFrame0 <= 20 && ticks >= targetHorizon) {
                     bestDelay = delay;
                     bestTicks = ticks;
@@ -544,7 +543,7 @@ public:
             if (m_gameHolding != m_physicalHolding) {
                 m_SimFireButton(pl, m_physicalHolding);
             }
-            printf("[InputBuffer] F8 -> SHIP PREDICTIVE %s\n", m_shipPrecisionEnabled ? "ON" : "OFF");
+            printf("[InputBuffer] F8 -> SHIP PREDICTIVE %s (current stage: %d ticks)\n", m_shipPrecisionEnabled ? "ON" : "OFF", m_maxTicksNormal);
             fflush(stdout);
         }
         if (GetAsyncKeyState(VK_F9) & 1) {
@@ -638,10 +637,11 @@ $on_mod(Loaded) {
     printf(" [InputBuffer] Starting Mode: STAGE 1 (1 All / 1 Wave)\n");
     printf(" [InputBuffer] F6: cycle 1/1 -> 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF\n");
     printf(" [InputBuffer] F7: hide/show this console\n");
-    printf(" [InputBuffer] F8: toggle Ship Predictive ON/OFF\n");
+    printf(" [InputBuffer] F8: toggle Ship Predictive (uses current F6 stage)\n");
     printf(" [InputBuffer] F9: force ALL stages + Ship Predictive OFF (raw input)\n");
     printf(" [InputBuffer] Edge-flush safety: pending predictions flush in order on a new physical edge\n");
-    printf(" [InputBuffer] Extended lookahead: Normal 200 / Ship 40 / Wave 80 / Mini Wave 60 ticks\n");
+    printf(" [InputBuffer] Stage applies to all modes; Ship delay limit follows Normal stage (1/2/4/8/16)\n");
+    printf(" [InputBuffer] Lookahead: Normal 200 / Ship 40 / Wave 80 / Mini Wave 60 ticks\n");
     printf("============================================================\n");
     fflush(stdout);
 }
