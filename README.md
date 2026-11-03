@@ -1,4 +1,4 @@
-# Geode Mods Active v0.1.2 — Quiet / Lazy Init pass
+# Geode Mods Active v0.1.3 — Anti-hitch / Anti-missed-click pass
 
 Target: Geometry Dash 2.2081 / Geode 5.11.2.
 
@@ -30,3 +30,10 @@ Source-level checks only. This environment has not compiled the Geode mod or ver
 
 ## Build
 The included GitHub Actions workflow builds a Windows `.geode` artifact using the configured Geode SDK setup.
+
+## v0.1.3 changes
+- Hard per-click simulation budget (PREDICTION_BUDGET_US). If prediction runs over, the click is sent raw and immediately.
+- Hidden simulation players are pre-created during level load again (lazy creation caused a mid-level hitch on the first click).
+- Duplicate-edge filter no longer trusts stale state: a real click is never swallowed after pause / alt-tab / restart.
+- PlayLayer::resetLevel re-syncs input state with the real key state.
+- Hotkey polling throttled and gated on window focus.

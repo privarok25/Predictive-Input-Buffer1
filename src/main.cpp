@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <deque>
+#include <chrono>
 
 using namespace geode::prelude;
 
@@ -22,6 +23,14 @@ using namespace geode::prelude;
 // This keeps isolated micro-clicks and spike/sawblade dodges 100% protected!
 constexpr int SPAM_INTERVAL_TICKS = 8;
 constexpr int SPAM_STREAK_REQUIRED = 3;
+
+// Hard wall-clock cap for ALL simulation work done for one input event.
+// If the cap is hit, the real input is passed through immediately and
+// unchanged. A click is therefore never delayed by a slow prediction.
+constexpr int PREDICTION_BUDGET_US = 1200;
+
+// Hotkeys are polled once every N player updates instead of every update.
+constexpr int KEY_POLL_INTERVAL = 16;
 
 // ============================================================================
 
@@ -54,6 +63,11 @@ private:
     bool m_bufferedPush = true;     // true = buffered PRESS, false = buffered RELEASE
     std::deque<bool> m_queuedInputs; // preserve every alternating edge while a buffered input is pending
     float m_frameDt = 0.25f;        // GD 240 TPS normalized dt is 0.25f
+
+    // Per-input simulation time budget
+    std::chrono::steady_clock::time_point m_deadline{};
+    bool m_budgetHit = false;
+    int  m_keyPollCounter = 0;
 
     // Streak-based Spam Guard state
     int  m_ticksSinceLastInput = 999;
@@ -121,12 +135,24 @@ public:
         PlayLayer* pl = PlayLayer::get();
         if (!pl) return;
 
-        // Simulation players are created lazily on the first real prediction.
-        // This avoids allocating hidden game objects when the buffer is disabled
-        // or when the player is only using raw input.
-        m_simPlayer1 = nullptr;
-        m_simPlayer2 = nullptr;
+        if (m_simPlayer1) { m_simPlayer1->release(); m_simPlayer1 = nullptr; }
+        if (m_simPlayer2) { m_simPlayer2->release(); m_simPlayer2 = nullptr; }
         resetAttemptInputState(false);
+
+        // Pre-create the hidden players NOW, while the level is still loading.
+        // Creating them lazily on the first click caused a visible hitch in the
+        // middle of gameplay (PlayerObject::create is expensive).
+        ensureSimulationPlayers();
+    }
+
+    // Called after PlayLayer::resetLevel (restart, practice respawn, etc.).
+    // Re-synchronizes input state with what is physically pressed so stale
+    // "held" state can never swallow the next real click.
+    void onLevelReset() {
+        bool held = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ||
+                    (GetAsyncKeyState(VK_SPACE)   & 0x8000) ||
+                    (GetAsyncKeyState(VK_UP)      & 0x8000);
+        resetAttemptInputState(held);
     }
 
     void quit() {
@@ -247,6 +273,11 @@ public:
         int safeLandedTicks = 0;
 
         for (int i = 0; i < delayFrames + maxTicks; i++) {
+            // Time budget: checked every 4 simulated ticks (cheap clock read).
+            if ((i & 3) == 0 && std::chrono::steady_clock::now() > m_deadline) {
+                m_budgetHit = true;
+                break;
+            }
             if (i == delayFrames) {
                 if (actionPush) {
                     m_simPlayer1->pushButton(PlayerButton::Jump);
@@ -352,8 +383,17 @@ public:
         // Only real state transitions are valid edges. Consume duplicate DOWN /
         // UP notifications while the buffer is active, before they can enter the
         // prediction path or queue. Raw-input mode (F6 OFF) remains untouched.
-        if (push == wasPhysicalHolding) {
-            return false;
+        // Only a TRUE duplicate is dropped: same as the physical state AND same
+        // as the last state the game was given / is scheduled to get. If our
+        // bookkeeping is stale (missed release while paused / alt-tabbed / after
+        // restart), the event is a real click and must go through.
+        {
+            const bool lastScheduledState = m_queuedInputs.empty()
+                ? (m_waitTicks >= 0 ? m_bufferedPush : m_gameHolding)
+                : m_queuedInputs.back();
+            if (push == wasPhysicalHolding && push == lastScheduledState) {
+                return false;
+            }
         }
 
         if (!p1 || p1->m_isDead) {
@@ -459,8 +499,16 @@ public:
         int targetHorizon = isShip ? 40 : (isMiniWave ? 60 : (isWave ? 80 : 200));
         int maxDelayFrames = isShip ? m_maxTicksNormal : (isWave ? m_maxTicksWave : m_maxTicksNormal);
 
+        m_deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(PREDICTION_BUDGET_US);
+        m_budgetHit = false;
+
         // 4. Check Frame 0 (immediate input) across the full trajectory horizon
         int ticksFrame0 = getSurvivalTicks(pl, p1, p2, isDual, 0, push, targetHorizon);
+        if (m_budgetHit) {
+            // Prediction too slow -> never risk the click, send it raw.
+            m_gameHolding = push;
+            return true;
+        }
         if (ticksFrame0 >= targetHorizon) {
             m_gameHolding = push;
             return true;
@@ -473,6 +521,7 @@ public:
 
         for (int delay = 1; delay <= maxDelayFrames; delay++) {
             int ticks = getSurvivalTicks(pl, p1, p2, isDual, delay, push, targetHorizon);
+            if (m_budgetHit) break; // truncated result: ignore it, keep best fully-computed delay
 
             if (isWave) {
                 // In Wave mode, delaying a turn inside a flat corridor naturally adds ~(2 * delay)
@@ -524,16 +573,28 @@ public:
         return true;
     }
 
-    void onPlayerUpdate(PlayerObject* player) {
-        PlayLayer* pl = PlayLayer::get();
-        if (!pl || player != pl->m_player1) return;
+    static bool gameWindowFocused() {
+        HWND fg = GetForegroundWindow();
+        if (!fg) return false;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(fg, &pid);
+        return pid == GetCurrentProcessId();
+    }
 
-        // F6 cycles stages, F8 toggles Ship Predictive,
-        // F9 is the master OFF switch for stages + Ship Predictive.
-        if (GetAsyncKeyState(VK_F6) & 1) {
+    // F6 cycles stages, F8 toggles Ship Predictive,
+    // F9 is the master OFF switch for stages + Ship Predictive.
+    void pollHotkeys(PlayLayer* pl) {
+        // Always read (this also consumes the "pressed since last call" bit),
+        // but only act while the game window is focused.
+        const bool f6 = GetAsyncKeyState(VK_F6) & 1;
+        const bool f8 = GetAsyncKeyState(VK_F8) & 1;
+        const bool f9 = GetAsyncKeyState(VK_F9) & 1;
+        if (!gameWindowFocused()) return;
+
+        if (f6) {
             cyclePreset();
         }
-        if (GetAsyncKeyState(VK_F8) & 1) {
+        if (f8) {
             m_shipPrecisionEnabled = !m_shipPrecisionEnabled;
             m_waitTicks = -1;
             m_queuedInputs.clear();
@@ -543,7 +604,7 @@ public:
                 m_SimFireButton(pl, m_physicalHolding);
             }
         }
-        if (GetAsyncKeyState(VK_F9) & 1) {
+        if (f9) {
             m_presetIndex = 5;
             m_enabled = false;
             m_maxTicksNormal = 0;
@@ -556,6 +617,18 @@ public:
             if (m_gameHolding != m_physicalHolding) {
                 m_SimFireButton(pl, m_physicalHolding);
             }
+        }
+    }
+
+    void onPlayerUpdate(PlayerObject* player) {
+        PlayLayer* pl = PlayLayer::get();
+        if (!pl || player != pl->m_player1) return;
+
+        // Hotkeys: polled at a low rate, and only acted on when the game window
+        // is focused (so F6/F8/F9 in other apps can't change the mod).
+        if (++m_keyPollCounter >= KEY_POLL_INTERVAL) {
+            m_keyPollCounter = 0;
+            pollHotkeys(pl);
         }
 
         const bool playerIsShip = player->m_isShip || (pl->m_gameState.m_isDualMode && pl->m_player2 && pl->m_player2->m_isShip);
@@ -630,6 +703,11 @@ class $modify(BufPlayLayer, PlayLayer) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
         s_sim.init();
         return true;
+    }
+
+    void resetLevel() {
+        PlayLayer::resetLevel();
+        s_sim.onLevelReset();
     }
 
     void destroyPlayer(PlayerObject* player, GameObject* gameObject) {
