@@ -6,6 +6,7 @@
 #include <Geode/modify/GameObject.hpp>
 #include <Geode/modify/EffectGameObject.hpp>
 #include <Geode/modify/HardStreak.hpp>
+#include <Geode/modify/CCScheduler.hpp>
 #include <Windows.h>
 #include <cstdio>
 #include <algorithm>
@@ -31,6 +32,11 @@ constexpr int PREDICTION_BUDGET_US = 1200;
 
 // Hotkeys are polled once every N player updates instead of every update.
 constexpr int KEY_POLL_INTERVAL = 16;
+
+// EMERGENCY KILL SWITCH: Ctrl + Shift + this key (works in menus and in levels).
+// Instantly makes the mod inert, then disables it through Geode. Geometry Dash
+// itself keeps running.
+constexpr int KILL_VK = VK_F10;
 
 // ============================================================================
 
@@ -68,6 +74,7 @@ private:
     std::chrono::steady_clock::time_point m_deadline{};
     bool m_budgetHit = false;
     int  m_keyPollCounter = 0;
+    bool m_killed = false;
 
     // Streak-based Spam Guard state
     int  m_ticksSinceLastInput = 999;
@@ -132,6 +139,7 @@ private:
 
 public:
     void init() {
+        if (m_killed) return;
         PlayLayer* pl = PlayLayer::get();
         if (!pl) return;
 
@@ -153,6 +161,25 @@ public:
                     (GetAsyncKeyState(VK_SPACE)   & 0x8000) ||
                     (GetAsyncKeyState(VK_UP)      & 0x8000);
         resetAttemptInputState(held);
+    }
+
+    bool isKilled() const { return m_killed; }
+
+    // Emergency shutdown: give the real held state back to the game (so no
+    // button stays stuck), drop all buffered edges, free the hidden players and
+    // make every hook a pass-through.
+    void kill() {
+        if (m_killed) return;
+        PlayLayer* pl = PlayLayer::get();
+        if (pl && m_gameHolding != m_physicalHolding) {
+            m_SimFireButton(pl, m_physicalHolding);
+        }
+        m_killed = true;
+        m_enabled = false;
+        m_shipPrecisionEnabled = false;
+        m_waitTicks = -1;
+        m_queuedInputs.clear();
+        quit();
     }
 
     void quit() {
@@ -621,6 +648,7 @@ public:
     }
 
     void onPlayerUpdate(PlayerObject* player) {
+        if (m_killed) return;
         PlayLayer* pl = PlayLayer::get();
         if (!pl || player != pl->m_player1) return;
 
@@ -687,6 +715,38 @@ public:
 };
 
 static TrajectoryBufferSim s_sim;
+
+static bool s_killRequested = false;
+
+static void pollKillSwitch() {
+    if (s_killRequested) return;
+    const bool ctrl  = GetAsyncKeyState(VK_CONTROL) & 0x8000;
+    const bool shift = GetAsyncKeyState(VK_SHIFT) & 0x8000;
+    const bool key   = GetAsyncKeyState(KILL_VK) & 0x8000;
+    if (!(ctrl && shift && key)) return;
+    if (!TrajectoryBufferSim::gameWindowFocused()) return;
+
+    s_killRequested = true;
+    s_sim.kill(); // instant: all hooks become pass-through right now
+
+    // Unhook for real, but from the main-thread queue, not from inside a hook.
+    queueInMainThread([]() {
+        auto res = Mod::get()->disable();
+        if (res.isErr()) {
+            log::error("Emergency disable failed: {}", res.unwrapErr());
+            Notification::create("Mod neutralized (Geode disable failed)", NotificationIcon::Warning)->show();
+        } else {
+            Notification::create("Geode Mods Action disabled", NotificationIcon::Success)->show();
+        }
+    });
+}
+
+class $modify(BufScheduler, CCScheduler) {
+    void update(float dt) {
+        CCScheduler::update(dt);
+        pollKillSwitch();
+    }
+};
 
 $on_mod(Loaded) {
     // Silent startup: no console window, banner, or automatic notifications.
@@ -819,7 +879,7 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
     }
 
     void handleButton(bool down, int button, bool isPlayer1) {
-        if (!s_sim.isSimulating() && !s_sim.isFiringBuffered() && button == 1 && PlayLayer::get()) {
+        if (!s_sim.isKilled() && !s_sim.isSimulating() && !s_sim.isFiringBuffered() && button == 1 && PlayLayer::get()) {
             if (!s_sim.interceptInput(this, down, isPlayer1)) {
                 return;
             }

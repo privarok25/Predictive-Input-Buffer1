@@ -3,9 +3,9 @@
   "gd": {
     "win": "2.2081"
   },
-  "version": "v0.1.3",
-  "id": "privarskii.predictivebuffer",
-  "name": "Geode Mods Active",
-  "developer": "privarskii",
-  "description": "Input prediction helpers with stage-synchronized ship prediction and global raw-input switch."
+  "version": "v0.1.2",
+  "id": "polerok.geodemodsaction",
+  "name": "Geode Mods Action",
+  "developer": "Polerok",
+  "description": "Optimized and cleaned-up Geode input mods: smooth, lag-free input prediction with a safe raw-input fallback."
 }

@@ -22,6 +22,6 @@ jobs:
       - name: Upload Geode artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Predictive-Input-Buffer-Prototype-Windows
+          name: Geode-Mods-Action-Windows
           path: ${{ steps.build.outputs.build-output }}/*.geode
           if-no-files-found: error
