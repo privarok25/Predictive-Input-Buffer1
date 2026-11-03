@@ -121,8 +121,11 @@ public:
         PlayLayer* pl = PlayLayer::get();
         if (!pl) return;
 
-        m_simPlayer1 = createTrajectoryPlayer();
-        m_simPlayer2 = createTrajectoryPlayer();
+        // Simulation players are created lazily on the first real prediction.
+        // This avoids allocating hidden game objects when the buffer is disabled
+        // or when the player is only using raw input.
+        m_simPlayer1 = nullptr;
+        m_simPlayer2 = nullptr;
         resetAttemptInputState(false);
     }
 
@@ -150,40 +153,33 @@ public:
                 m_enabled = true;
                 m_maxTicksNormal = 1;
                 m_maxTicksWave = 1;
-                printf("[InputBuffer] F6 Cycle -> STAGE 1: 1 Tick All | 1 Tick Wave (0.25f @ 60fps)\n");
                 break;
             case 1:
                 m_enabled = true;
                 m_maxTicksNormal = 2;
                 m_maxTicksWave = 2;
-                printf("[InputBuffer] F6 Cycle -> STAGE 2: 2 Ticks All | 2 Ticks Wave (0.5f @ 60fps)\n");
                 break;
             case 2:
                 m_enabled = true;
                 m_maxTicksNormal = 4;
                 m_maxTicksWave = 4;
-                printf("[InputBuffer] F6 Cycle -> STAGE 3: 4 Ticks All | 4 Ticks Wave (1.0f @ 60fps)\n");
                 break;
             case 3:
                 m_enabled = true;
                 m_maxTicksNormal = 8;
                 m_maxTicksWave = 8;
-                printf("[InputBuffer] F6 Cycle -> STAGE 4: 8 Ticks All | 8 Ticks Wave (2.0f @ 60fps)\n");
                 break;
             case 4:
                 m_enabled = true;
                 m_maxTicksNormal = 16;
                 m_maxTicksWave = 8;
-                printf("[InputBuffer] F6 Cycle -> STAGE 5: 16 Ticks All | 8 Ticks Wave (4.0f / 2.0f @ 60fps)\n");
                 break;
             case 5:
                 m_enabled = false;
                 m_maxTicksNormal = 0;
                 m_maxTicksWave = 0;
-                printf("[InputBuffer] F6 Cycle -> STAGE 6: OFF (100%% Raw Input)\n");
                 break;
         }
-        fflush(stdout);
     }
 
     bool isSimulating() const { return m_simulating; }
@@ -210,8 +206,15 @@ public:
         }
     }
 
+    bool ensureSimulationPlayers() {
+        if (m_simPlayer1 && m_simPlayer2) return true;
+        if (!m_simPlayer1) m_simPlayer1 = createTrajectoryPlayer();
+        if (!m_simPlayer2) m_simPlayer2 = createTrajectoryPlayer();
+        return m_simPlayer1 && m_simPlayer2;
+    }
+
     int getSurvivalTicks(PlayLayer* pl, PlayerObject* realP1, PlayerObject* realP2, bool isDual, int delayFrames, bool actionPush, int maxTicks) {
-        if (!pl || !m_simPlayer1 || !realP1) return maxTicks;
+        if (!pl || !realP1 || !ensureSimulationPlayers()) return 0;
 
         m_simulating = true;
         m_simulationDead = false;
@@ -450,8 +453,6 @@ public:
         }
 
         m_queuedInputs.clear();
-        const char* act = push ? "PRESS" : "RELEASE";
-
         // Extended trajectory lookahead. Ship uses a shorter horizon because
         // long straight-flight simulation can drift from the live state. The
         // selected stage controls the maximum ship delay, just like other modes.
@@ -514,8 +515,6 @@ public:
         }
 
         if (bestDelay > 0) {
-            printf("[InputBuffer] *** SAVED +%d TICKS (%.2f frames @ 60fps) %s! (Frame0: %d -> Delayed: %d) [Limit: %d] ***\n",
-                bestDelay, bestDelay / 4.0f, act, ticksFrame0, bestTicks, maxDelayFrames);
             m_bufferedPush = push;
             m_waitTicks = bestDelay;
             return false;
@@ -529,7 +528,7 @@ public:
         PlayLayer* pl = PlayLayer::get();
         if (!pl || player != pl->m_player1) return;
 
-        // F6 cycles stages, F7 toggles console, F8 toggles Ship Predictive,
+        // F6 cycles stages, F8 toggles Ship Predictive,
         // F9 is the master OFF switch for stages + Ship Predictive.
         if (GetAsyncKeyState(VK_F6) & 1) {
             cyclePreset();
@@ -543,8 +542,6 @@ public:
             if (m_gameHolding != m_physicalHolding) {
                 m_SimFireButton(pl, m_physicalHolding);
             }
-            printf("[InputBuffer] F8 -> SHIP PREDICTIVE %s (current stage: %d ticks)\n", m_shipPrecisionEnabled ? "ON" : "OFF", m_maxTicksNormal);
-            fflush(stdout);
         }
         if (GetAsyncKeyState(VK_F9) & 1) {
             m_presetIndex = 5;
@@ -558,16 +555,6 @@ public:
             m_ticksSinceLastInput = 999;
             if (m_gameHolding != m_physicalHolding) {
                 m_SimFireButton(pl, m_physicalHolding);
-            }
-            printf("[InputBuffer] F9 -> ALL STAGES + SHIP PREDICTIVE OFF (raw input)\n");
-            fflush(stdout);
-        }
-        if (GetAsyncKeyState(VK_F7) & 1) {
-            HWND console = GetConsoleWindow();
-            if (console) {
-                static bool consoleVisible = true;
-                consoleVisible = !consoleVisible;
-                ShowWindow(console, consoleVisible ? SW_SHOW : SW_HIDE);
             }
         }
 
@@ -615,6 +602,7 @@ public:
     }
 
     void m_SimFireButton(PlayLayer* pl, bool push) {
+        if (!pl || m_gameHolding == push) return;
         m_firingBuffered = true;
         m_gameHolding = push;
         pl->handleButton(push, 1, true);
@@ -628,22 +616,7 @@ public:
 static TrajectoryBufferSim s_sim;
 
 $on_mod(Loaded) {
-    AllocConsole();
-    FILE* f;
-    freopen_s(&f, "CONOUT$", "w", stdout);
-    SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
-    printf("============================================================\n");
-    printf(" [InputBuffer] Geode Mods Active loaded\n");
-    printf(" [InputBuffer] Starting Mode: STAGE 1 (1 All / 1 Wave)\n");
-    printf(" [InputBuffer] F6: cycle 1/1 -> 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF\n");
-    printf(" [InputBuffer] F7: hide/show this console\n");
-    printf(" [InputBuffer] F8: toggle Ship Predictive (uses current F6 stage)\n");
-    printf(" [InputBuffer] F9: force ALL stages + Ship Predictive OFF (raw input)\n");
-    printf(" [InputBuffer] Edge-flush safety: pending predictions flush in order on a new physical edge\n");
-    printf(" [InputBuffer] Stage applies to all modes; Ship delay limit follows Normal stage (1/2/4/8/16)\n");
-    printf(" [InputBuffer] Lookahead: Normal 200 / Ship 40 / Wave 80 / Mini Wave 60 ticks\n");
-    printf("============================================================\n");
-    fflush(stdout);
+    // Silent startup: no console window, banner, or automatic notifications.
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -777,13 +750,28 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
     }
 
     void collisionCheckObjects(PlayerObject* player, gd::vector<GameObject*>* vec, int objectsCount, float dt) {
-        // Prediction must use the exact candidate-object list selected by the game.
-        // Do not second-guess it with an objectType whitelist: custom, animated,
-        // slope-like and future object types can otherwise be silently omitted,
-        // creating false "safe gaps" in overlapping geometry.
-        // Passing the original list also avoids rebuilding/filtering a vector on
-        // every simulated tick. The game's own collision routine remains the
-        // authority for collision semantics and hitboxes.
+        if (s_sim.isSimulating()) {
+            // Reuse the same temporary vector on every simulated tick to avoid
+            // repeated heap allocations during trajectory prediction.
+            static gd::vector<GameObject*> extra;
+            extra.clear();
+            if (extra.capacity() < static_cast<size_t>(objectsCount)) {
+                extra.reserve(objectsCount);
+            }
+            for (int i = 0; i < objectsCount; i++) {
+                GameObject* obj = vec->at(i);
+                if (!obj) continue;
+                if (obj->m_objectType == GameObjectType::Solid ||
+                    obj->m_objectType == GameObjectType::Hazard ||
+                    obj->m_objectType == GameObjectType::AnimatedHazard ||
+                    obj->m_objectType == GameObjectType::CollisionObject ||
+                    obj->m_objectType == GameObjectType::Slope) {
+                    extra.push_back(obj);
+                }
+            }
+            GJBaseGameLayer::collisionCheckObjects(player, &extra, extra.size(), dt);
+            return;
+        }
         GJBaseGameLayer::collisionCheckObjects(player, vec, objectsCount, dt);
     }
 

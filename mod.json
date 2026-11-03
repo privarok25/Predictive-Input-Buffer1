@@ -3,9 +3,9 @@
   "gd": {
     "win": "2.2081"
   },
-  "version": "v0.2.0",
+  "version": "v0.1.1",
   "id": "privarskii.predictivebuffer",
   "name": "Geode Mods Active",
   "developer": "privarskii",
-  "description": "Conservative input prediction using the game collision candidate list; no player physics or hitbox changes."
+  "description": "Input prediction helpers with stage-synchronized ship prediction and global raw-input switch."
 }

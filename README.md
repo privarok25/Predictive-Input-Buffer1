@@ -1,23 +1,32 @@
-# Geode Mods Active v0.2.0 — Conservative Prediction Engine
+# Geode Mods Active v0.1.2 — Quiet / Lazy Init pass
 
 Target: Geometry Dash 2.2081 / Geode 5.11.2.
 
-## Core safety rule
-This build does not change Geometry Dash movement, gravity, speed, hitboxes, collision rules, or level geometry. It does not steer or hold the player automatically. It only evaluates possible timings for an actual physical input edge and may delay that edge within the selected stage.
-
-## Collision-candidate handling change
-The previous prediction hook filtered the game's collision candidate list using a hard-coded `GameObjectType` whitelist. That could omit an object type the engine had already selected for collision processing, making an overlapping/stacked layout look like it contained a safe gap. v0.2.0 removes that second whitelist and forwards the exact candidate list to the original Geometry Dash collision routine. The game remains authoritative for collision semantics and hitboxes.
-
-This is a targeted correction, not a claim that every broadphase limitation is solved: the mod still relies on the candidate list supplied by the engine for the simulated player's position. If the game itself supplies an incomplete list in a particular simulation context, that requires a deeper engine/API-level investigation.
-
-## Performance
-The per-tick temporary-vector construction, capacity checks, object filtering, and copying are removed from the simulation collision hook. The original collision routine receives the existing candidate vector directly. Prediction horizons and stage limits are intentionally unchanged so this build does not silently change the assistance strength.
-
 ## Controls
-- **F6**: cycle stages: 1/1 -> 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF.
-- **F7**: hide/show diagnostic console.
-- **F8**: toggle Ship Predictive; it uses the current global stage.
-- **F9**: disable all stages and Ship Predictive (raw input).
+- **F6**: cycle input-buffer stages: 1/1 -> 2/2 -> 4/4 -> 8/8 -> 16/8 -> OFF.
+- **F8**: toggle Ship Predictive ON/OFF. When enabled, ship uses the currently selected F6 stage.
+- **F9**: master raw-input switch; disables every stage and Ship Predictive, clears pending buffered edges, and synchronizes held state. F6 can cycle back to Stage 1.
+
+## Quiet behavior
+- No console window is created on mod load.
+- No startup banner, save notifications, or per-prediction console messages are emitted.
+- No in-game indicators are added.
+- F7 no longer has a console action.
+
+## Incremental safety / performance changes
+- Hidden simulation PlayerObjects are created lazily, only when an actual prediction is requested, instead of during every PlayLayer initialization.
+- Internal buffered dispatch has a final state-transition guard to avoid sending duplicate synthetic DOWN/DOWN or UP/UP edges.
+- Existing queue ordering, prediction horizons, stage values, and original collision/physics routines are otherwise retained in this pass.
+
+## Important limitations
+- Geode Modify hooks are installed by the mod's hook system; this implementation does not dynamically uninstall them when prediction is disabled. The hooks are gated and should pass through ordinary game behavior when simulation is inactive. Full runtime hook uninstallation is not implemented.
+- Accurate prediction currently depends on live game objects and original collision routines, so the simulation remains synchronous on the game thread. Moving it to a worker thread without a safe snapshot of all relevant game state would risk races and incorrect physics. This pass does not claim to solve that.
+- The deeper CPU optimization, full stale-edge/physical-state audit, and broader collision-object equivalence testing are intentionally not included until measured and tested separately.
+
+No auto-steering, auto-hold, gravity/speed/hitbox changes, or edits to the real player's physics. The mod only decides whether to delay a real input edge.
 
 ## Testing
-Source-level change only. This archive has not been compiled against the Geode SDK or tested in Geometry Dash in this environment. Test first in Practice Mode, especially overlapping structures, slopes, animated hazards, dual, wave and ship. Compare CPU usage and verify that ordinary inputs remain unchanged on safe sections.
+Source-level checks only. This environment has not compiled the Geode mod or verified behavior in Geometry Dash. Test in Practice Mode first, especially stage changes, F8/F9 transitions, death/restart, and dual mode. Absolute elimination of missed clicks cannot be guaranteed without testing against the exact game/input setup.
+
+## Build
+The included GitHub Actions workflow builds a Windows `.geode` artifact using the configured Geode SDK setup.
