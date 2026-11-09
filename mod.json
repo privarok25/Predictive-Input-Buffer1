@@ -4,8 +4,7 @@
     "win": "2.2081"
   },
   "version": "v0.1.2",
-  "id": "polerok.geodemodsaction",
+  "id": "polerok.geode-mods-action",
   "name": "Geode Mods Action",
-  "developer": "Polerok",
-  "description": "Optimized and cleaned-up Geode input mods: smooth, lag-free input prediction with a safe raw-input fallback."
+  "developer": "Polerok"
 }
