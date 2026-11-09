@@ -34,8 +34,3 @@ The existing game collision and physics routines are retained by this version. T
 This is an experimental utility. Prediction remains synchronous on the game thread because it uses live game objects and the game's collision routines. This release does not dynamically uninstall Geode hooks when disabled; hooks remain installed but are gated so ordinary gameplay should pass through when prediction is inactive.
 
 The source has not been independently compiled or tested in-game as part of this metadata update. Test in Practice Mode first, including Wave, Ship, Dual, death/restart, stage changes, and F8/F9 transitions. No guarantee is made that every level pattern or input device behaves identically.
-
-
-### Resource usage
-
-The simulation player for Player 2 is created only when a Dual-mode prediction actually needs it. Single-player levels therefore avoid allocating and retaining an unused hidden PlayerObject. Prediction horizons and collision checks are intentionally unchanged to preserve behavior.

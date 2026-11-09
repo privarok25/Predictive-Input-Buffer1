@@ -206,16 +206,15 @@ public:
         }
     }
 
-    bool ensureSimulationPlayers(bool needPlayer2) {
-        // Player 2 is only needed in Dual mode. Avoid constructing and retaining
-        // a second hidden PlayerObject in ordinary single-player levels.
+    bool ensureSimulationPlayers() {
+        if (m_simPlayer1 && m_simPlayer2) return true;
         if (!m_simPlayer1) m_simPlayer1 = createTrajectoryPlayer();
-        if (needPlayer2 && !m_simPlayer2) m_simPlayer2 = createTrajectoryPlayer();
-        return m_simPlayer1 && (!needPlayer2 || m_simPlayer2);
+        if (!m_simPlayer2) m_simPlayer2 = createTrajectoryPlayer();
+        return m_simPlayer1 && m_simPlayer2;
     }
 
     int getSurvivalTicks(PlayLayer* pl, PlayerObject* realP1, PlayerObject* realP2, bool isDual, int delayFrames, bool actionPush, int maxTicks) {
-        if (!pl || !realP1 || (isDual && !realP2) || !ensureSimulationPlayers(isDual)) return 0;
+        if (!pl || !realP1 || !ensureSimulationPlayers()) return 0;
 
         m_simulating = true;
         m_simulationDead = false;
