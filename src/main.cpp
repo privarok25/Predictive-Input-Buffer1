@@ -206,15 +206,16 @@ public:
         }
     }
 
-    bool ensureSimulationPlayers() {
-        if (m_simPlayer1 && m_simPlayer2) return true;
+    bool ensureSimulationPlayers(bool needPlayer2) {
+        // Player 2 is only needed in Dual mode. Avoid constructing and retaining
+        // a second hidden PlayerObject in ordinary single-player levels.
         if (!m_simPlayer1) m_simPlayer1 = createTrajectoryPlayer();
-        if (!m_simPlayer2) m_simPlayer2 = createTrajectoryPlayer();
-        return m_simPlayer1 && m_simPlayer2;
+        if (needPlayer2 && !m_simPlayer2) m_simPlayer2 = createTrajectoryPlayer();
+        return m_simPlayer1 && (!needPlayer2 || m_simPlayer2);
     }
 
     int getSurvivalTicks(PlayLayer* pl, PlayerObject* realP1, PlayerObject* realP2, bool isDual, int delayFrames, bool actionPush, int maxTicks) {
-        if (!pl || !realP1 || !ensureSimulationPlayers()) return 0;
+        if (!pl || !realP1 || (isDual && !realP2) || !ensureSimulationPlayers(isDual)) return 0;
 
         m_simulating = true;
         m_simulationDead = false;
@@ -376,51 +377,17 @@ public:
             return true;
         }
 
-        // Keep edge order while a predicted input is pending. If another physical
-        // edge arrives before the prediction delay expires, flush the pending edge
-        // and all queued transitions immediately, in order. Waiting for one edge per
-        // PlayerObject::update can make a tight Wave press/release arrive too late.
-        auto enqueueEdge = [this](bool state) {
-            bool lastScheduled = m_queuedInputs.empty()
-                ? (m_waitTicks >= 0 ? m_bufferedPush : m_gameHolding)
-                : m_queuedInputs.back();
-            if (state != lastScheduled) m_queuedInputs.push_back(state);
-        };
-        auto flushPendingEdges = [this, pl]() {
-            if (m_waitTicks >= 0) {
-                const bool pendingState = m_bufferedPush;
-                m_waitTicks = -1;
-                if (m_gameHolding != pendingState) {
-                    m_SimFireButton(pl, pendingState);
-                }
+        // A new physical edge invalidates an older delayed edge. Do NOT replay
+        // the pending press and release back-to-back in one frame: on fast Wave
+        // direction changes that can leave the game's button state latched.
+        // The physical state is authoritative. Cancel the stale prediction and
+        // reconcile the game to the latest real state immediately.
+        if (m_waitTicks >= 0 || !m_queuedInputs.empty()) {
+            m_waitTicks = -1;
+            m_queuedInputs.clear();
+            if (m_gameHolding != push) {
+                m_SimFireButton(pl, push);
             }
-            while (!m_queuedInputs.empty()) {
-                const bool nextState = m_queuedInputs.front();
-                m_queuedInputs.pop_front();
-                if (m_gameHolding != nextState) {
-                    m_SimFireButton(pl, nextState);
-                }
-            }
-            // The physical state is authoritative; recover if the queue and game
-            // state somehow diverged while processing a burst of edges.
-            if (m_gameHolding != m_physicalHolding) {
-                m_SimFireButton(pl, m_physicalHolding);
-            }
-        };
-
-        if (m_waitTicks >= 0) {
-            enqueueEdge(push);
-            flushPendingEdges();
-            m_ticksSinceLastInput = 0;
-            return false;
-        }
-
-        // A queue should normally be empty outside a pending prediction. If an
-        // older pending sequence exists, resolve it now rather than dropping a
-        // new Wave edge or leaving the queue behind the real input.
-        if (!m_queuedInputs.empty()) {
-            enqueueEdge(push);
-            flushPendingEdges();
             m_ticksSinceLastInput = 0;
             return false;
         }

@@ -1,11 +1,10 @@
 {
-    "geode": "5.11.2",
-    "version": "1.0.0",
-    "id": "polerok.geode-mods-action",
-    "name": "Geode Mods Action",
-    "developer": "Polerok23",
-    "description": "Everyday updates and optimized modes for Geode.",
-    "gd": {
-        "win": "2.2081"
-    }
+  "geode": "5.11.2",
+  "gd": {
+    "win": "2.2081"
+  },
+  "version": "v0.1.3",
+  "id": "polerok.geode-mods-action",
+  "name": "Geode Mods Action",
+  "developer": "Polerok"
 }
