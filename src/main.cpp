@@ -59,6 +59,25 @@ private:
     int  m_ticksSinceLastInput = 999;
     int  m_rapidInputStreak = 0;
 
+    // Experimental Adaptive AI (online heuristic learner, no network/model download).
+    // It learns whether recent buffered interventions tend to be followed by survival.
+    bool  m_adaptiveAIEnabled = false;
+    float m_aiConfidence = 0.50f; // bounded [0.20, 0.90]
+    int   m_aiPendingTicks = 0;
+    int   m_aiEvaluated = 0;
+    int   m_aiSuccessful = 0;
+
+    void rewardAdaptiveAI(bool survived) {
+        if (!m_adaptiveAIEnabled || m_aiPendingTicks <= 0) return;
+        // Conservative online update: failures weigh more than survivals so the
+        // controller backs off quickly after a bad intervention.
+        m_aiConfidence += survived ? 0.025f : -0.10f;
+        m_aiConfidence = std::clamp(m_aiConfidence, 0.20f, 0.90f);
+        ++m_aiEvaluated;
+        if (survived) ++m_aiSuccessful;
+        m_aiPendingTicks = 0;
+    }
+
     PlayerObject* createTrajectoryPlayer() {
         PlayLayer* pl = PlayLayer::get();
         if (!pl) return nullptr;
@@ -127,6 +146,10 @@ public:
         m_simPlayer1 = nullptr;
         m_simPlayer2 = nullptr;
         resetAttemptInputState(false);
+        m_aiConfidence = 0.50f;
+        m_aiPendingTicks = 0;
+        m_aiEvaluated = 0;
+        m_aiSuccessful = 0;
     }
 
     void quit() {
@@ -193,6 +216,7 @@ public:
         // Real player died -> discard pending actions. If the physical key is
         // still held, require a genuine release before allowing a new press.
         // This avoids the game-state resync synthesizing a press after respawn.
+        rewardAdaptiveAI(false);
         resetAttemptInputState(m_physicalHolding);
         return false;
     }
@@ -482,8 +506,19 @@ public:
         }
 
         if (bestDelay > 0) {
+            if (m_adaptiveAIEnabled) {
+                // The adaptive gate only accepts interventions with enough
+                // simulated benefit. Lower confidence raises the required gain.
+                const int predictedGain = bestTicks - ticksFrame0;
+                const int requiredGain = static_cast<int>(8.0f + (0.70f - m_aiConfidence) * 20.0f);
+                if (predictedGain < requiredGain) {
+                    m_gameHolding = push;
+                    return true;
+                }
+            }
             m_bufferedPush = push;
             m_waitTicks = bestDelay;
+            if (m_adaptiveAIEnabled) m_aiPendingTicks = 24;
             return false;
         }
 
@@ -510,6 +545,15 @@ public:
                 m_SimFireButton(pl, m_physicalHolding);
             }
         }
+        if (GetAsyncKeyState(VK_F10) & 1) {
+            m_adaptiveAIEnabled = !m_adaptiveAIEnabled;
+            m_aiPendingTicks = 0;
+            m_waitTicks = -1;
+            m_queuedInputs.clear();
+            if (m_gameHolding != m_physicalHolding) {
+                m_SimFireButton(pl, m_physicalHolding);
+            }
+        }
         if (GetAsyncKeyState(VK_F9) & 1) {
             m_presetIndex = 5;
             m_enabled = false;
@@ -531,6 +575,11 @@ public:
         // Do not let the normal state-sync path manufacture a press while the
         // physical button is still held from the previous attempt.
         if (m_waitForReleaseAfterDeath) return;
+
+        if (m_aiPendingTicks > 0) {
+            if (m_aiPendingTicks == 1) rewardAdaptiveAI(true);
+            else --m_aiPendingTicks;
+        }
 
         if (m_ticksSinceLastInput < 999) {
             m_ticksSinceLastInput++;

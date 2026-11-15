@@ -33,3 +33,19 @@ Source-level checks only. This environment has not compiled the Geode mod or ver
 ## Build
 The included GitHub Actions workflow builds a Windows `.geode` artifact using the configured Geode SDK setup.
 
+
+## Experimental Adaptive AI (F10)
+
+F10 toggles an experimental in-game adaptive decision layer. It does not generate
+inputs or control the player: it only decides whether an already-predicted delayed
+input has enough simulated survival benefit to be buffered. It uses the existing
+trajectory simulation and a small session-local online confidence value.
+
+The confidence starts at 0.50, rises slightly when the player survives 24 player
+updates after an intervention, and drops more sharply if the attempt ends during
+that evaluation window. Lower confidence makes the gate more conservative. The
+value is reset when the mod is initialized and is not written to disk.
+
+This is an adaptive heuristic prototype, not a neural network or a trained model.
+F6 still cycles the existing buffer stages, F8 toggles Ship Predictive, and F9
+turns the predictive features off. F10 only toggles the adaptive decision layer.
