@@ -66,6 +66,44 @@ private:
     int   m_aiPendingTicks = 0;
     int   m_aiEvaluated = 0;
     int   m_aiSuccessful = 0;
+    // Probabilistic intervention controller. It never drops a physical input:
+    // it only decides whether a predicted delay is allowed for a given edge.
+    // Fatigue rises with longer/repeated interventions and recovers on raw edges.
+    float m_aiFatigue = 0.0f; // [0, 1]
+    int   m_aiInterventionStreak = 0;
+    unsigned int m_aiRng = 0xA341316Cu;
+
+    float nextAdaptiveRandom() {
+        // Small deterministic xorshift PRNG: no allocation, no network, no STL RNG.
+        m_aiRng ^= m_aiRng << 13;
+        m_aiRng ^= m_aiRng >> 17;
+        m_aiRng ^= m_aiRng << 5;
+        return static_cast<float>(m_aiRng & 0x00FFFFFFu) / 16777216.0f;
+    }
+
+    float adaptiveInterventionChance(int delayFrames) const {
+        // Chance that the AI is permitted to use a predicted delay on this edge.
+        // One frame starts at 88%; longer delays become progressively less likely.
+        float baseChance = 0.88f / (1.0f + 0.28f * static_cast<float>(std::max(0, delayFrames - 1)));
+        float streakPenalty = std::min(0.30f, static_cast<float>(m_aiInterventionStreak) * 0.045f);
+        float fatiguePenalty = 0.65f * m_aiFatigue;
+        float chance = baseChance * (1.0f - fatiguePenalty - streakPenalty);
+        return std::clamp(chance, 0.08f, 0.92f);
+    }
+
+    void noteAdaptiveIntervention(int delayFrames) {
+        if (!m_adaptiveAIEnabled) return;
+        ++m_aiInterventionStreak;
+        // A one-frame intervention adds little fatigue; 2+ frames add more.
+        m_aiFatigue = std::clamp(m_aiFatigue + 0.07f + 0.075f * static_cast<float>(std::max(0, delayFrames - 1)), 0.0f, 1.0f);
+    }
+
+    void noteAdaptiveRawEdge(bool wasInterventionCandidate) {
+        if (!m_adaptiveAIEnabled) return;
+        // Raw inputs are recovery opportunities. This is gradual, not a hard cooldown.
+        m_aiFatigue = std::max(0.0f, m_aiFatigue - (wasInterventionCandidate ? 0.025f : 0.045f));
+        if (m_aiInterventionStreak > 0) --m_aiInterventionStreak;
+    }
 
     void rewardAdaptiveAI(bool survived) {
         if (!m_adaptiveAIEnabled || m_aiPendingTicks <= 0) return;
@@ -150,6 +188,9 @@ public:
         m_aiPendingTicks = 0;
         m_aiEvaluated = 0;
         m_aiSuccessful = 0;
+        m_aiFatigue = 0.0f;
+        m_aiInterventionStreak = 0;
+        m_aiRng = static_cast<unsigned int>(GetTickCount()) ^ 0xA341316Cu;
     }
 
     void quit() {
@@ -453,6 +494,7 @@ public:
         // 4. Check Frame 0 (immediate input) across the full trajectory horizon
         int ticksFrame0 = getSurvivalTicks(pl, p1, p2, isDual, 0, push, targetHorizon);
         if (ticksFrame0 >= targetHorizon) {
+            noteAdaptiveRawEdge(false);
             m_gameHolding = push;
             return true;
         }
@@ -507,21 +549,28 @@ public:
 
         if (bestDelay > 0) {
             if (m_adaptiveAIEnabled) {
-                // The adaptive gate only accepts interventions with enough
-                // simulated benefit. Lower confidence raises the required gain.
+                // First require a meaningful predicted benefit, then apply a
+                // probability gate. A rejected intervention still sends the
+                // user's original edge immediately; no click is ever discarded.
                 const int predictedGain = bestTicks - ticksFrame0;
                 const int requiredGain = static_cast<int>(8.0f + (0.70f - m_aiConfidence) * 20.0f);
-                if (predictedGain < requiredGain) {
+                const float allowChance = adaptiveInterventionChance(bestDelay);
+                if (predictedGain < requiredGain || nextAdaptiveRandom() >= allowChance) {
+                    noteAdaptiveRawEdge(true);
                     m_gameHolding = push;
                     return true;
                 }
             }
             m_bufferedPush = push;
             m_waitTicks = bestDelay;
-            if (m_adaptiveAIEnabled) m_aiPendingTicks = 24;
+            if (m_adaptiveAIEnabled) {
+                noteAdaptiveIntervention(bestDelay);
+                m_aiPendingTicks = 24;
+            }
             return false;
         }
 
+        noteAdaptiveRawEdge(false);
         m_gameHolding = push;
         return true;
     }
@@ -548,6 +597,9 @@ public:
         if (GetAsyncKeyState(VK_F10) & 1) {
             m_adaptiveAIEnabled = !m_adaptiveAIEnabled;
             m_aiPendingTicks = 0;
+            m_aiFatigue = 0.0f;
+            m_aiInterventionStreak = 0;
+            m_aiRng = static_cast<unsigned int>(GetTickCount()) ^ 0xA341316Cu;
             m_waitTicks = -1;
             m_queuedInputs.clear();
             if (m_gameHolding != m_physicalHolding) {
