@@ -23,6 +23,10 @@ using namespace geode::prelude;
 constexpr int SPAM_INTERVAL_TICKS = 8;
 constexpr int SPAM_STREAK_REQUIRED = 3;
 
+// Never schedule a buffered edge at its first predicted viable instant.
+// Prefer +2 physics ticks; fall back to +1 only if +2 is not survivable.
+constexpr int BUFFER_EDGE_GUARD_TICKS = 2;
+
 // ============================================================================
 
 class TrajectoryBufferSim {
@@ -54,6 +58,7 @@ private:
     bool m_bufferedPush = true;     // true = buffered PRESS, false = buffered RELEASE
     std::deque<bool> m_queuedInputs; // preserve every alternating edge while a buffered input is pending
     float m_frameDt = 0.25f;        // GD 240 TPS normalized dt is 0.25f
+    bool  m_cbfActive = false;      // CBF splits one visual frame into timestamped physics substeps
 
     // Streak-based Spam Guard state
     int  m_ticksSinceLastInput = 999;
@@ -151,6 +156,11 @@ private:
     }
 
     float getValidDt() const {
+        // CBF calls PlayerObject::update with fractional substep deltas around
+        // timestamped inputs. Those fractions are not a full future physics tick;
+        // reusing one as the prediction dt would progressively under-simulate the
+        // trajectory. Predict with one normalized 240-TPS tick instead.
+        if (m_cbfActive) return 0.25f;
         if (m_frameDt > 0.001f && m_frameDt < 2.0f) {
             return m_frameDt;
         }
@@ -183,6 +193,13 @@ public:
         // or when the player is only using raw input.
         m_simPlayer1 = nullptr;
         m_simPlayer2 = nullptr;
+        // CBF v1.5.0 queues timestamped inputs and dispatches them from its
+        // PlayerObject::update substep loop. Detect whether that path is active.
+        if (auto* cbf = Loader::get()->getLoadedMod("syzzi.click_between_frames")) {
+            m_cbfActive = !cbf->getSettingValue<bool>("soft-toggle");
+        } else {
+            m_cbfActive = false;
+        }
         resetAttemptInputState(false);
         m_aiConfidence = 0.50f;
         m_aiPendingTicks = 0;
@@ -263,6 +280,10 @@ public:
     }
 
     void setFrameDelta(float dt) {
+        if (m_cbfActive) {
+            m_frameDt = 0.25f;
+            return;
+        }
         PlayLayer* pl = PlayLayer::get();
         if (pl && pl->m_gameState.m_timeWarp > 0.f) {
             m_frameDt = dt / pl->m_gameState.m_timeWarp;
@@ -548,6 +569,38 @@ public:
         }
 
         if (bestDelay > 0) {
+            // Add a small timing guard so the mod does not release/press on the
+            // very first possible frame of its own prediction. Re-simulate the
+            // longer delay: never extend an edge unless that exact timing still
+            // clears the predicted hazard. Prefer +2 ticks, then +1.
+            int guardedDelay = 0;
+            int guardedTicks = 0;
+            for (int extra = BUFFER_EDGE_GUARD_TICKS; extra >= 1; --extra) {
+                const int candidateDelay = bestDelay + extra;
+                const int candidateTicks = getSurvivalTicks(pl, p1, p2, isDual, candidateDelay, push, targetHorizon);
+                bool candidateSafe = false;
+                if (isWave) {
+                    candidateSafe = candidateTicks >= targetHorizon ||
+                        (candidateTicks >= ticksFrame0 + (candidateDelay * 2 + 6) && candidateTicks > ticksFrame0 + 2);
+                } else if (isShip) {
+                    candidateSafe = ticksFrame0 <= 20 && candidateTicks >= targetHorizon;
+                } else {
+                    candidateSafe = candidateTicks >= targetHorizon || candidateTicks > ticksFrame0 + 12;
+                }
+                if (candidateSafe) {
+                    guardedDelay = candidateDelay;
+                    guardedTicks = candidateTicks;
+                    break;
+                }
+            }
+            if (guardedDelay == 0) {
+                noteAdaptiveRawEdge(true);
+                m_gameHolding = push;
+                return true;
+            }
+            bestDelay = guardedDelay;
+            bestTicks = guardedTicks;
+
             if (m_adaptiveAIEnabled) {
                 // First require a meaningful predicted benefit, then apply a
                 // probability gate. A rejected intervention still sends the
@@ -767,6 +820,11 @@ class $modify(BufPlayerObject, PlayerObject) {
         (void)self.setHookPriority("PlayerObject::playSpiderDashEffect", -1000000);
         (void)self.setHookPriority("PlayerObject::incrementJumps", -1000000);
         (void)self.setHookPriority("PlayerObject::ringJump", -1000000);
+        // CBF's PlayerObject::update wrapper pops timestamped inputs before it
+        // calls the next update hook. Run our tick bookkeeping late so each CBF
+        // edge is observed first and buffered countdown advances once per
+        // actual physics substep, not before CBF dispatches that substep's input.
+        (void)self.setHookPriority("PlayerObject::update", -1000000);
     }
 
     void playSpiderDashEffect(cocos2d::CCPoint from, cocos2d::CCPoint to) {
